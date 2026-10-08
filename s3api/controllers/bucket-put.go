@@ -698,13 +698,21 @@ func (c S3ApiController) CreateBucket(ctx fiber.Ctx) (*Response, error) {
 		}, err
 	}
 
+	// An S3 backend behind a region specific endpoint rejects a CreateBucket
+	// that carries no location constraint, so pass on the one this request was
+	// validated against. us-east-1 takes no constraint.
+	createBucketConf := &types.CreateBucketConfiguration{
+		Tags: body.TagSet,
+	}
+	if body.LocationConstraint != nil {
+		createBucketConf.LocationConstraint = types.BucketLocationConstraint(*body.LocationConstraint)
+	}
+
 	err = c.be.CreateBucket(ctx.RequestCtx(), &s3.CreateBucketInput{
 		Bucket:                     &bucket,
 		ObjectOwnership:            objectOwnership,
 		ObjectLockEnabledForBucket: &lockEnabled,
-		CreateBucketConfiguration: &types.CreateBucketConfiguration{
-			Tags: body.TagSet,
-		},
+		CreateBucketConfiguration:  createBucketConf,
 	}, updAcl)
 	if err != nil {
 		return &Response{

@@ -1046,6 +1046,83 @@ func TestS3ApiController_CreateBucket(t *testing.T) {
 	}
 }
 
+// The api layer validates the location constraint against the gateway region,
+// but the backend still has to see it: an S3 backend fronted by a region
+// specific endpoint rejects a CreateBucket that carries no constraint.
+func TestS3ApiController_CreateBucketLocationConstraintForwarding(t *testing.T) {
+	adminAcc := auth.Account{
+		Access: "root",
+		Role:   auth.RoleAdmin,
+	}
+
+	const region = "eu-west-1"
+	euLocConstBody, err := xml.Marshal(s3response.CreateBucketConfiguration{
+		LocationConstraint: utils.GetStringPtr(region),
+	})
+	assert.NoError(t, err)
+
+	tests := []struct {
+		name     string
+		region   string
+		body     []byte
+		expected types.BucketLocationConstraint
+	}{
+		{
+			name:     "matching non us-east-1 constraint is forwarded",
+			region:   region,
+			body:     euLocConstBody,
+			expected: types.BucketLocationConstraint(region),
+		},
+		{
+			name:   "us-east-1 sends no constraint",
+			region: "us-east-1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got *s3.CreateBucketInput
+			be := &BackendMock{
+				CreateBucketFunc: func(_ context.Context, input *s3.CreateBucketInput, _ []byte) error {
+					got = input
+					return nil
+				},
+			}
+
+			ctrl := S3ApiController{
+				be:  be,
+				iam: auth.NewIAMServiceSingle(adminAcc),
+			}
+
+			testController(t, ctrl.CreateBucket, &Response{
+				MetaOpts: &MetaOptions{
+					BucketOwner: adminAcc.Access,
+				},
+				Headers: map[string]*string{
+					"Location":         utils.GetStringPtr("/my-bucket"),
+					"x-amz-bucket-arn": utils.GetStringPtr("arn:aws:s3:::my-bucket"),
+				},
+			}, nil, ctxInputs{
+				locals: map[utils.ContextKey]any{
+					utils.ContextKeyAccount: adminAcc,
+					utils.ContextKeyRegion:  tt.region,
+				},
+				bucket: "my-bucket",
+				body:   tt.body,
+			})
+
+			if !assert.NotNil(t, got) {
+				return
+			}
+			if got.CreateBucketConfiguration == nil {
+				assert.Empty(t, tt.expected)
+				return
+			}
+			assert.Equal(t, tt.expected, got.CreateBucketConfiguration.LocationConstraint)
+		})
+	}
+}
+
 func TestS3ApiController_PutBucketAcl(t *testing.T) {
 	invalidBody, err := xml.Marshal(auth.AccessControlPolicy{
 		Owner: &types.Owner{
